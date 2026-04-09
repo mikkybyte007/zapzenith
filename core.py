@@ -4,8 +4,57 @@ import asyncio
 # A instância global do client/wa será armazenada aqui
 wa_client = None
 
+import requests
+import json
+import asyncio
+
+# Webhook do Supabase gerado pelo Lovable
+WEBHOOK_URL = "https://lbkzdycnqrgvbuxoljvt.supabase.co/functions/v1/whatsapp-webhook?empresa_id=caaa1ef3-6e8c-4fdd-9388-69d95c4a9458"
+
+def forward_to_webhook(sender_id, text_body):
+    """
+    Envia a mensagem recebida para o Webhook do Supabase, 
+    imitando a estrutura do JSON da API oficial da Meta.
+    """
+    # Remove o sufixo @c.us se existir
+    phone_number = sender_id.replace('@c.us', '')
+    
+    payload = {
+        "object": "whatsapp_business_account",
+        "entry": [{
+            "changes": [{
+                "field": "messages",
+                "value": {
+                    "messaging_product": "whatsapp",
+                    "messages": [{
+                        "from": phone_number,
+                        "text": {"body": text_body},
+                        "type": "text"
+                    }]
+                }
+            }]
+        }]
+    }
+    
+    try:
+        response = requests.post(WEBHOOK_URL, json=payload, timeout=5)
+        print(f"Webhook acionado com sucesso: Status {response.status_code}")
+    except Exception as e:
+        print(f"Erro ao enviar para o webhook: {e}")
+
 def on_message(message):
-    print(f"Nova mensagem de {message.get('from', 'Desconhecido')}: {message.get('body', '')}")
+    sender = message.get('from', 'Desconhecido')
+    body = message.get('body', '')
+    
+    # Ignora mensagens se não tiverem corpo de texto (ex: mídias não suportadas inicialmente)
+    if not body:
+        return
+        
+    print(f"Nova mensagem recebida de {sender}: {body}")
+    
+    # Usa threading puro para não depender do event loop e não travar o WPP_Whatsapp
+    import threading
+    threading.Thread(target=forward_to_webhook, args=(sender, body)).start()
 
 def start_whatsapp():
     global wa_client
