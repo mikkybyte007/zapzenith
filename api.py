@@ -22,6 +22,10 @@ class MessageRequest(BaseModel):
     number: str
     text: str
 
+@app.get("/")
+async def root():
+    return {"status": "ZapZenith Gateway Online!"}
+
 @app.on_event("startup")
 async def startup_event():
     # Em uma aplicação real assíncrona, deve-se usar threads ou async se a lib bloquear
