@@ -1,0 +1,5 @@
+fastapi
+uvicorn
+WPP_Whatsapp>=0.1.72
+playwright
+nest-asyncio
