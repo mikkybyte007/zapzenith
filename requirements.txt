@@ -1,5 +1,11 @@
 fastapi
 uvicorn
-WPP_Whatsapp>=0.1.72
 playwright
+supabase
+python-dotenv
+slowapi
+secure
+tenacity
+pytest
+WPP_Whatsapp>=0.1.72
 nest-asyncio

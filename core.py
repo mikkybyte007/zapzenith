@@ -5,9 +5,11 @@ from WPP_Whatsapp import Create
 from supabase import create_client, Client
 from dotenv import load_dotenv
 
+# Resiliência
+from tenacity import retry, stop_after_attempt, wait_exponential
+
 load_dotenv()
 
-# Configuração Supabase
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
 
@@ -15,92 +17,98 @@ supabase: Client = None
 if SUPABASE_URL and SUPABASE_KEY:
     supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 else:
-    print("Aviso: SUPABASE_URL e SUPABASE_KEY não configurados no .env")
+    print("Aviso crítico de segurança: SUPABASE_URL e SUPABASE_KEY não configurados no .env")
 
-# A instância global do client/wa será armazenada aqui
 wa_client = None
-
-# UUID da Instância (Defina no .env ou hardcoded para teste)
 INSTANCE_ID = os.environ.get("INSTANCE_ID", None)
 
+@retry(stop=stop_after_attempt(5), wait=wait_exponential(multiplier=1, min=2, max=10))
 def update_instance_status(status: str, qrcode_base64: str = None):
     if not supabase or not INSTANCE_ID:
         return
-    try:
-        data = {"status": status}
-        if qrcode_base64 is not None:
-            data["qrcode_base64"] = qrcode_base64
-        supabase.table("whatsapp_instances").update(data).eq("id", INSTANCE_ID).execute()
-    except Exception as e:
-        print(f"Erro ao atualizar status da instância no Supabase: {e}")
+    data = {"status": status}
+    if qrcode_base64 is not None:
+        data["qrcode_base64"] = qrcode_base64
+    supabase.table("whatsapp_instances").update(data).eq("id", INSTANCE_ID).execute()
 
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=5))
 def handle_incoming_message(sender_id, text_body):
     """
-    Insere a mensagem recebida no Supabase, lidando com a tabela de chats.
+    Insere mensagem e cria chat se não existir (Com retry e backoff)
     """
     if not supabase or not INSTANCE_ID:
-        print("Supabase não configurado. Mensagem recebida:", text_body)
         return
 
     phone_number = sender_id.replace('@c.us', '')
     
-    try:
-        # 1. Verifica se existe o chat
-        chat_response = supabase.table("chats").select("id").eq("contact_number", phone_number).eq("instance_id", INSTANCE_ID).execute()
-        
-        chat_id = None
-        if len(chat_response.data) > 0:
-            chat_id = chat_response.data[0]["id"]
-            # Atualiza o last_message
-            supabase.table("chats").update({"last_message_preview": text_body[:50]}).eq("id", chat_id).execute()
-        else:
-            # Cria novo chat
-            new_chat = supabase.table("chats").insert({
-                "instance_id": INSTANCE_ID,
-                "contact_name": phone_number,
-                "contact_number": phone_number,
-                "last_message_preview": text_body[:50],
-                "status": "OPEN"
-            }).execute()
-            chat_id = new_chat.data[0]["id"]
-
-        # 2. Insere a mensagem
-        supabase.table("messages").insert({
-            "chat_id": chat_id,
+    # Previne falhas transacionais
+    chat_response = supabase.table("chats").select("id, status").eq("contact_number", phone_number).eq("instance_id", INSTANCE_ID).execute()
+    
+    chat_id = None
+    if len(chat_response.data) > 0:
+        chat_id = chat_response.data[0]["id"]
+        # Atualiza a preview e força chat a reabrir se estiver CLOSED
+        updates = {"last_message_preview": text_body[:50]}
+        if chat_response.data[0]["status"] == "CLOSED":
+            updates["status"] = "OPEN"
+            
+        supabase.table("chats").update(updates).eq("id", chat_id).execute()
+    else:
+        new_chat = supabase.table("chats").insert({
             "instance_id": INSTANCE_ID,
-            "sender": "CUSTOMER",
-            "content": text_body
+            "contact_name": phone_number,
+            "contact_number": phone_number,
+            "last_message_preview": text_body[:50],
+            "status": "OPEN"
         }).execute()
-        print(f"Mensagem salva no banco com sucesso.")
-    except Exception as e:
-        print(f"Erro ao salvar mensagem no Supabase: {e}")
+        chat_id = new_chat.data[0]["id"]
+
+    supabase.table("messages").insert({
+        "chat_id": chat_id,
+        "instance_id": INSTANCE_ID,
+        "sender": "CUSTOMER",
+        "content": text_body
+    }).execute()
 
 def on_message(message):
     sender = message.get('from', 'Desconhecido')
     body = message.get('body', '')
     
+    # Tratamento Edge Case: Mensagem sem texto (Apenas mídia não suportada)
     if not body:
+        print(f"[{sender}] Ignorando mensagem multimídia ou sem texto.")
         return
         
-    print(f"Nova mensagem recebida de {sender}: {body}")
-    
     threading.Thread(target=handle_incoming_message, args=(sender, body)).start()
 
 def on_qr_code(qrCode, asciiQR, attempt, urlCode):
-    print("QR Code recebido!")
-    # qrCode (o primeiro argumento na lib WPP) normalmente é a string data URI ou raw
-    # Vamos salvar no supabase para o frontend ler
-    update_instance_status("QRCODE", qrcode_base64=urlCode)
+    print(f"QR Code recebido (Tentativa {attempt})")
+    # Envia base64 para o Supabase
+    try:
+        update_instance_status("QRCODE", qrcode_base64=urlCode)
+    except Exception as e:
+        print("Falha ao salvar QR Code no banco", e)
 
 def on_status_find(statusSession, session):
-    print("Status Session:", statusSession)
-    if statusSession == "isLogged" or statusSession == "inChat" or statusSession == "SUCCESS":
-        update_instance_status("CONNECTED", qrcode_base64="")
+    print("Event Status Session:", statusSession)
+    
+    if statusSession in ["isLogged", "inChat", "SUCCESS"]:
+        try:
+            update_instance_status("CONNECTED", qrcode_base64="")
+        except:
+            pass
+    
+    # Circuit Breaker: Desconexão ou Queda do Browser
+    if statusSession in ["autocloseCalled", "browserClose", "desconnectedMobile"]:
+        print("Alerta: Dispositivo desconectado ou sessão caiu. Sinalizando Fallback...")
+        try:
+            update_instance_status("DISCONNECTED", qrcode_base64="")
+        except:
+            pass
 
 def start_whatsapp():
     global wa_client
     
-    # Se houver instance_id, tenta registrar no DB se não existir
     if supabase and INSTANCE_ID:
         try:
             res = supabase.table("whatsapp_instances").select("id").eq("id", INSTANCE_ID).execute()
@@ -109,21 +117,20 @@ def start_whatsapp():
         except:
             pass
 
-    # Passamos as funções callback para a lib WPP
     wa_client = Create(
         session="bot_session", 
         catchQR=on_qr_code, 
         statusFind=on_status_find,
         logQR=True
     )
-    wa_client.start()
     
+    wa_client.start()
     wa_client.onMessage(on_message)
-    print("WhatsApp motor iniciado com sucesso.")
+    print("WhatsApp motor ligado. Monitorando eventos...")
 
 def send_message(number: str, text: str):
     if wa_client is None:
-        raise Exception("Cliente WhatsApp não está inicializado.")
+        raise Exception("Cliente WhatsApp está offline.")
     
     if not number.endswith("@c.us"):
         number = f"{number}@c.us"

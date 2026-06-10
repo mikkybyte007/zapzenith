@@ -57,15 +57,32 @@ ALTER TABLE public.whatsapp_instances ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.chats ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.messages ENABLE ROW LEVEL SECURITY;
 
+-- Apagar políticas antigas para garantir a substituição limpa
+DROP POLICY IF EXISTS "Allow all authenticated access to whatsapp_instances" ON public.whatsapp_instances;
+DROP POLICY IF EXISTS "Allow authenticated access to chats" ON public.chats;
+DROP POLICY IF EXISTS "Allow authenticated access to messages" ON public.messages;
+
 -- Policies for whatsapp_instances
--- (Example: allow read/write to all authenticated users for now, or you can restrict to user_id)
-CREATE POLICY "Allow all authenticated access to whatsapp_instances" ON public.whatsapp_instances
-    FOR ALL USING (auth.role() = 'authenticated');
+CREATE POLICY "Users can only manage their own instances" ON public.whatsapp_instances
+    FOR ALL USING (auth.role() = 'authenticated' AND auth.uid() = user_id);
 
 -- Policies for chats
-CREATE POLICY "Allow authenticated access to chats" ON public.chats
-    FOR ALL USING (auth.role() = 'authenticated');
+CREATE POLICY "Users can only manage chats from their instances" ON public.chats
+    FOR ALL USING (
+        auth.role() = 'authenticated' AND 
+        EXISTS (
+            SELECT 1 FROM public.whatsapp_instances wi 
+            WHERE wi.id = chats.instance_id AND wi.user_id = auth.uid()
+        )
+    );
 
 -- Policies for messages
-CREATE POLICY "Allow authenticated access to messages" ON public.messages
-    FOR ALL USING (auth.role() = 'authenticated');
+CREATE POLICY "Users can only manage messages from their instances" ON public.messages
+    FOR ALL USING (
+        auth.role() = 'authenticated' AND 
+        EXISTS (
+            SELECT 1 FROM public.whatsapp_instances wi 
+            WHERE wi.id = messages.instance_id AND wi.user_id = auth.uid()
+        )
+    );
+
