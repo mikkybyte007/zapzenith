@@ -52,8 +52,11 @@ class MessageRequest(BaseModel):
 async def root(request: Request):
     return {"status": "ZapZenith Gateway Enterprise Online!"}
 
+from queue_manager import start_queue_worker
+
 @app.on_event("startup")
 async def startup_event():
+    start_queue_worker()
     asyncio.create_task(asyncio.to_thread(start_whatsapp))
 
 def save_sent_message(number: str, text: str, chat_id: str):

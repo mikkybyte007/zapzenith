@@ -86,3 +86,53 @@ CREATE POLICY "Users can only manage messages from their instances" ON public.me
         )
     );
 
+-- MÓDULO DKW: AI, RAG & CRM KANBAN
+
+-- Ativar extensão vetorial para IA
+CREATE EXTENSION IF NOT EXISTS vector;
+
+-- Table: crm_deals
+CREATE TABLE IF NOT EXISTS public.crm_deals (
+    id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
+    instance_id UUID REFERENCES public.whatsapp_instances(id) ON DELETE CASCADE,
+    chat_id UUID REFERENCES public.chats(id) ON DELETE SET NULL,
+    title TEXT NOT NULL,
+    value NUMERIC DEFAULT 0,
+    stage TEXT DEFAULT 'LEAD' CHECK (stage IN ('LEAD', 'MEETING', 'NEGOTIATION', 'WON', 'LOST')),
+    assigned_to UUID REFERENCES auth.users(id) ON DELETE SET NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL,
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
+);
+
+-- Table: knowledge_base (RAG)
+CREATE TABLE IF NOT EXISTS public.knowledge_base (
+    id UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
+    instance_id UUID REFERENCES public.whatsapp_instances(id) ON DELETE CASCADE,
+    content TEXT NOT NULL,
+    embedding vector(1536), -- Dimensão padrão openai
+    metadata JSONB DEFAULT '{}'::jsonb,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()) NOT NULL
+);
+
+ALTER TABLE public.crm_deals ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.knowledge_base ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Users can only manage deals from their instances" ON public.crm_deals
+    FOR ALL USING (
+        auth.role() = 'authenticated' AND 
+        EXISTS (
+            SELECT 1 FROM public.whatsapp_instances wi 
+            WHERE wi.id = crm_deals.instance_id AND wi.user_id = auth.uid()
+        )
+    );
+
+CREATE POLICY "Users can only manage knowledge from their instances" ON public.knowledge_base
+    FOR ALL USING (
+        auth.role() = 'authenticated' AND 
+        EXISTS (
+            SELECT 1 FROM public.whatsapp_instances wi 
+            WHERE wi.id = knowledge_base.instance_id AND wi.user_id = auth.uid()
+        )
+    );
+
+ALTER PUBLICATION supabase_realtime ADD TABLE public.crm_deals;
